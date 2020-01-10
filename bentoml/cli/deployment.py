@@ -19,8 +19,13 @@ from __future__ import print_function
 import click
 import logging
 import time
+import json
+from datetime import datetime
 
 from google.protobuf.json_format import MessageToJson
+from tabulate import tabulate
+import humanfriendly
+
 from bentoml.cli.click_utils import (
     _echo,
     CLI_COLOR_ERROR,
@@ -28,28 +33,21 @@ from bentoml.cli.click_utils import (
     parse_bento_tag_callback,
     parse_yaml_file_callback,
 )
-from bentoml.cli.deployment_utils import deployment_yaml_to_pb
-from bentoml.yatai import get_yatai_service
-from bentoml.proto.deployment_pb2 import (
-    ApplyDeploymentRequest,
-    DeleteDeploymentRequest,
-    GetDeploymentRequest,
-    DescribeDeploymentRequest,
-    ListDeploymentsRequest,
-    Deployment,
-    DeploymentSpec,
-    DeploymentState,
-)
-from bentoml.proto.status_pb2 import Status
+from bentoml.proto.deployment_pb2 import DeploymentSpec, DeploymentState
+from bentoml.proto import status_pb2
 from bentoml.utils import pb_to_yaml
 from bentoml.utils.usage_stats import track_cli
-from bentoml.exceptions import BentoMLDeploymentException, BentoMLException
-from bentoml.deployment.store import ALL_NAMESPACE_TAG
-from bentoml import config
+from bentoml.exceptions import BentoMLException
+from bentoml.cli.utils import Spinner
+from bentoml.yatai.client import YataiClient
 
 # pylint: disable=unused-variable
 
 logger = logging.getLogger(__name__)
+
+
+DEFAULT_SAGEMAKER_INSTANCE_TYPE = 'ml.m4.xlarge'
+DEFAULT_SAGEMAKER_INSTANCE_COUNT = 1
 
 
 def parse_key_value_pairs(key_value_pairs_str):
@@ -65,97 +63,212 @@ def parse_key_value_pairs(key_value_pairs_str):
     return result
 
 
-def display_deployment_info(deployment, output):
-    if output == 'yaml':
+def _print_deployment_info(deployment, output_type):
+    if output_type == 'yaml':
         result = pb_to_yaml(deployment)
     else:
         result = MessageToJson(deployment)
+        if deployment.state.info_json:
+            result = json.loads(result)
+            result['state']['infoJson'] = json.loads(deployment.state.info_json)
+            _echo(json.dumps(result, indent=2, separators=(',', ': ')))
+            return
     _echo(result)
 
 
+def _format_labels_for_print(labels):
+    if not labels:
+        return None
+    result = []
+    for label_key in labels:
+        result.append(
+            '{label_key}:{label_value}'.format(
+                label_key=label_key, label_value=labels[label_key]
+            )
+        )
+    return '\n'.join(result)
+
+
+def _format_deployment_age_for_print(deployment_pb):
+    if not deployment_pb.created_at:
+        # deployments created before version 0.4.5 don't have created_at field,
+        # we will not show the age for those deployments
+        return None
+    else:
+        deployment_duration = datetime.utcnow() - deployment_pb.created_at.ToDatetime()
+        return humanfriendly.format_timespan(deployment_duration)
+
+
+def _print_deployments_table(deployments):
+    table = []
+    headers = ['NAME', 'NAMESPACE', 'LABELS', 'PLATFORM', 'STATUS', 'AGE']
+    for deployment in deployments:
+        row = [
+            deployment.name,
+            deployment.namespace,
+            _format_labels_for_print(deployment.labels),
+            DeploymentSpec.DeploymentOperator.Name(deployment.spec.operator)
+            .lower()
+            .replace('_', '-'),
+            DeploymentState.State.Name(deployment.state.state)
+            .lower()
+            .replace('_', ' '),
+            _format_deployment_age_for_print(deployment),
+        ]
+        table.append(row)
+    table_display = tabulate(table, headers, tablefmt='plain')
+    _echo(table_display)
+
+
+def _print_deployments_info(deployments, output_type):
+    if output_type == 'table':
+        _print_deployments_table(deployments)
+    else:
+        for deployment in deployments:
+            _print_deployment_info(deployment, output_type)
+
+
 def get_state_after_await_action_complete(
-    yatai_service, name, namespace, message, timeout_limit=600, wait_time=5
+    yatai_client, name, namespace, message, timeout_limit=600, wait_time=5
 ):
     start_time = time.time()
-    while (time.time() - start_time) < timeout_limit:
-        result = yatai_service.DescribeDeployment(
-            DescribeDeploymentRequest(deployment_name=name, namespace=namespace)
-        )
-        if result.state.state is DeploymentState.PENDING:
-            time.sleep(wait_time)
-            _echo(message)
-            continue
-        else:
-            break
+
+    with Spinner(message):
+        while (time.time() - start_time) < timeout_limit:
+            result = yatai_client.deployment.describe(namespace, name)
+            if (
+                result.status.status_code == status_pb2.Status.OK
+                and result.state.state is DeploymentState.PENDING
+            ):
+                time.sleep(wait_time)
+                continue
+            else:
+                break
     return result
 
 
 def get_deployment_sub_command():
-    @click.group(help='Deployment commands. Shorthand is `deploy`')
+    @click.group(
+        help='Commands for creating and managing BentoService deployments on cloud'
+        'computing platforms or kubernetes cluster'
+    )
     def deployment():
         pass
 
     @deployment.command(
-        short_help='Create a model serving deployment',
+        short_help='Create a BentoService model serving deployment',
         context_settings=dict(ignore_unknown_options=True, allow_extra_args=True),
     )
     @click.argument("name", type=click.STRING, required=True)
     @click.option(
+        '-b',
         '--bento',
+        '--bento-service-bundle',
         type=click.STRING,
         required=True,
         callback=parse_bento_tag_callback,
-        help='Deployed bento archive, in format of name:version. For example, '
-        'iris_classifier:v1.2.0',
+        help='Target BentoService to be deployed, referenced by its name and version '
+        'in format of name:version. For example: "iris_classifier:v1.2.0"',
     )
     @click.option(
+        '-p',
         '--platform',
-        type=click.Choice(
-            ['aws-lambda', 'gcp-function', 'aws-sagemaker', 'kubernetes', 'custom'],
-            case_sensitive=False,
-        ),
+        type=click.Choice(['aws-lambda', 'aws-sagemaker'], case_sensitive=False),
         required=True,
-        help='Target platform that Bento archive is going to deployed to',
+        help='Which cloud platform to deploy this BentoService to',
     )
-    @click.option('--namespace', type=click.STRING, help='Deployment namespace')
     @click.option(
+        '-n',
+        '--namespace',
+        type=click.STRING,
+        help='Deployment namespace managed by BentoML, default value is "default" which'
+        'can be changed in BentoML configuration file',
+    )
+    @click.option(
+        '-l',
         '--labels',
         type=click.STRING,
-        help='Key:value pairs that attached to deployment.',
+        help='Key:value pairs that are attached to deployments and intended to be used'
+        'to specify identifying attributes of the deployments that are meaningful to '
+        'users',
     )
-    @click.option('--annotations', type=click.STRING)
+    @click.option(
+        '--annotations',
+        type=click.STRING,
+        help='Used to attach arbitary metadata to BentoService deployments, BentoML '
+        'library and other plugins can then retrieve this metadata.',
+    )
     @click.option(
         '--region',
-        help='Name of the deployed region. For platforms: AWS Lambda, AWS SageMaker, '
-        'GCP Function',
+        help='Directly mapping to cloud provider region. Option applicable to platform:'
+        'AWS Lambda, AWS SageMaker',
     )
     @click.option(
         '--instance-type',
-        help='Type of instance will be used for inference. For platform: AWS SageMaker',
+        help='Type of instance will be used for inference. Option applicable to '
+        'platform: AWS SageMaker. Default to "m1.m4.xlarge"',
+        type=click.STRING,
+        default=DEFAULT_SAGEMAKER_INSTANCE_TYPE,
     )
     @click.option(
         '--instance-count',
-        help='Number of instance will be used. For platform: AWS SageMaker',
+        help='Number of instance will be used. Option applicable to platform: AWS '
+        'SageMaker. Default value is 1',
+        type=click.INT,
+        default=DEFAULT_SAGEMAKER_INSTANCE_COUNT,
+    )
+    @click.option(
+        '--num-of-gunicorn-workers-per-instance',
+        help='Number of gunicorn worker will be used per instance. Option applicable '
+        'to platform: AWS SageMaker. Default value for gunicorn worker is based on '
+        'the instance\' cpu core counts.  The formula is num_of_cpu/2 + 1',
         type=click.INT,
     )
     @click.option(
         '--api-name',
-        help='User defined API function will be used for inference. For platform: '
-        'AWS SageMaker',
+        help='User defined API function will be used for inference. Required for AWS '
+        'SageMaker',
     )
     @click.option(
         '--kube-namespace',
-        help='Namespace for kubernetes deployment. For platform: Kubernetes',
+        help='Namespace for kubernetes deployment. Option applicable to platform: '
+        'Kubernetes',
     )
-    @click.option('--replicas', help='Number of replicas. For platform: Kubernetes')
-    @click.option('--service-name', help='Name for service. For platform: Kubernetes')
-    @click.option('--service-type', help='Service Type. For platform: Kubernetes')
-    @click.option('--output', type=click.Choice(['json', 'yaml']), default='json')
+    @click.option(
+        '--replicas',
+        help='Number of replicas. Option applicable to platform: Kubernetes',
+        type=click.INT,
+    )
+    @click.option(
+        '--memory-size',
+        help="Maximum Memory Capacity for AWS Lambda function, you can set the memory "
+        "size in 64MB increments from 128MB to 3008MB. The default value "
+        "is 1024 MB.",
+        type=click.INT,
+        default=1024,
+    )
+    @click.option(
+        '--timeout',
+        help="The amount of time that AWS Lambda allows a function to run before "
+        "stopping it. The default is 3 seconds. The maximum allowed value is "
+        "900 seconds",
+        type=click.INT,
+        default=3,
+    )
+    @click.option(
+        '--service-name',
+        help='Name for service. Option applicable to platform: Kubernetes',
+    )
+    @click.option(
+        '--service-type', help='Service Type. Option applicable to platform: Kubernetes'
+    )
+    @click.option('-o', '--output', type=click.Choice(['json', 'yaml']), default='json')
     @click.option(
         '--wait/--no-wait',
         default=True,
-        help='Wait for apply action to complete or encounter an error.'
-        'If set to no-wait, CLI will return immediately. The default value is wait',
+        help='Wait for cloud resources to complete creation or until an error is '
+        'encountered. When set to no-wait, CLI will return immediately after sending'
+        'request to cloud platform.',
     )
     def create(
         name,
@@ -168,110 +281,205 @@ def get_deployment_sub_command():
         region,
         instance_type,
         instance_count,
+        num_of_gunicorn_workers_per_instance,
         api_name,
         kube_namespace,
         replicas,
         service_name,
         service_type,
+        memory_size,
+        timeout,
         wait,
     ):
         # converting platform parameter to DeploymentOperator name in proto
         # e.g. 'aws-lambda' to 'AWS_LAMBDA'
-        platform = platform.replace('-', '_').upper()
-        operator = DeploymentSpec.DeploymentOperator.Value(platform)
-
-        track_cli('deploy-create', platform)
-
-        yatai_service = get_yatai_service()
-
-        # Make sure there is no active deployment with the same deployment name
-        get_deployment = yatai_service.GetDeployment(
-            GetDeploymentRequest(deployment_name=name, namespace=namespace)
-        )
-        if get_deployment.status.status_code != Status.NOT_FOUND:
-            raise BentoMLDeploymentException(
-                'Deployment {name} already existed, please use update or apply command'
-                ' instead'.format(name=name)
-            )
-
-        if operator == DeploymentSpec.AWS_SAGEMAKER:
-            if not api_name:
-                raise click.BadParameter(
-                    'api-name is required for Sagemaker deployment'
-                )
-
-            sagemaker_operator_config = DeploymentSpec.SageMakerOperatorConfig(
-                region=region or config().get('aws', 'default_region'),
-                instance_count=instance_count
-                or config().getint('sagemaker', 'instance_count'),
-                instance_type=instance_type
-                or config().get('sagemaker', 'instance_type'),
-                api_name=api_name,
-            )
-            spec = DeploymentSpec(sagemaker_operator_config=sagemaker_operator_config)
-        elif operator == DeploymentSpec.AWS_LAMBDA:
-            aws_lambda_operator_config = DeploymentSpec.AwsLambdaOperatorConfig(
-                region=region or config().get('aws', 'default_region')
-            )
-            spec = DeploymentSpec(aws_lambda_operator_config=aws_lambda_operator_config)
-        elif operator == DeploymentSpec.GCP_FUNCTION:
-            gcp_function_operator_config = DeploymentSpec.GcpFunctionOperatorConfig(
-                region=region or config().get('google-cloud', 'default_region')
-            )
-            spec = DeploymentSpec(
-                gcp_function_operator_config=gcp_function_operator_config
-            )
-        elif operator == DeploymentSpec.KUBERNETES:
-            kubernetes_operator_config = DeploymentSpec.KubernetesOperatorConfig(
-                kube_namespace=kube_namespace,
-                replicas=replicas,
-                service_name=service_name,
-                service_type=service_type,
-            )
-            spec = DeploymentSpec(kubernetes_operator_config=kubernetes_operator_config)
-        else:
-            raise BentoMLDeploymentException(
-                'Custom deployment is not supported in the current version of BentoML'
-            )
-
+        track_cli('deploy-create', platform.replace('-', '_').upper())
         bento_name, bento_version = bento.split(':')
-        spec.bento_name = bento_name
-        spec.bento_version = bento_version
-        spec.operator = operator
-
-        result = yatai_service.ApplyDeployment(
-            ApplyDeploymentRequest(
-                deployment=Deployment(
-                    namespace=namespace,
-                    name=name,
-                    annotations=parse_key_value_pairs(annotations),
-                    labels=parse_key_value_pairs(labels),
-                    spec=spec,
-                )
+        operator_spec = {
+            'region': region,
+            'instance_type': instance_type,
+            'instance_count': instance_count,
+            'num_of_gunicorn_workers_per_instance': num_of_gunicorn_workers_per_instance,  # noqa E501
+            'api_name': api_name,
+            'kube_namespace': kube_namespace,
+            'replicas': replicas,
+            'service_name': service_name,
+            'service_type': service_type,
+            'memory_size': memory_size,
+            'timeout': timeout,
+        }
+        yatai_client = YataiClient()
+        try:
+            result = yatai_client.deployment.create(
+                name,
+                namespace,
+                bento_name,
+                bento_version,
+                platform,
+                operator_spec,
+                parse_key_value_pairs(labels),
+                parse_key_value_pairs(annotations),
             )
-        )
-        if result.status.status_code != Status.OK:
+        except BentoMLException as e:
             _echo(
-                'Failed to create deployment {name}. code: {error_code}, message: '
+                'Failed to create deployment {}.: {}'.format(name, str(e)),
+                CLI_COLOR_ERROR,
+            )
+            return
+
+        if result.status.status_code != status_pb2.Status.OK:
+            _echo(
+                'Failed to create deployment {name}. {error_code}:'
                 '{error_message}'.format(
                     name=name,
-                    error_code=Status.Code.Name(result.status.status_code),
+                    error_code=status_pb2.Status.Code.Name(result.status.status_code),
                     error_message=result.status.error_message,
                 ),
                 CLI_COLOR_ERROR,
             )
+            return
         else:
             if wait:
                 result_state = get_state_after_await_action_complete(
-                    yatai_service=yatai_service,
+                    yatai_client=yatai_client,
                     name=name,
                     namespace=namespace,
-                    message='Creating deployment...',
+                    message='Creating deployment ',
                 )
+                if result_state.status.status_code != status_pb2.Status.OK:
+                    _echo(
+                        'Created deployment {name}, failed to retrieve latest status.'
+                        ' {error_code}:{error_message}'.format(
+                            name=name,
+                            error_code=status_pb2.Status.Code.Name(
+                                result_state.status.status_code
+                            ),
+                            error_message=result_state.status.error_message,
+                        )
+                    )
+                    return
                 result.deployment.state.CopyFrom(result_state.state)
 
-            _echo('Finished create deployment {}'.format(name), CLI_COLOR_SUCCESS)
-            display_deployment_info(result.deployment, output)
+            track_cli('deploy-create-success', platform.replace('-', '_').upper())
+            _echo('Successfully created deployment {}'.format(name), CLI_COLOR_SUCCESS)
+            _print_deployment_info(result.deployment, output)
+
+    @deployment.command(help='Update existing deployment')
+    @click.argument("name", type=click.STRING, required=True)
+    @click.option(
+        '-n',
+        '--namespace',
+        type=click.STRING,
+        help='Deployment namespace managed by BentoML, default value is "default" which'
+        'can be changed in BentoML configuration file',
+    )
+    @click.option(
+        '-b',
+        '--bento',
+        '--bento-service-bundle',
+        type=click.STRING,
+        callback=parse_bento_tag_callback,
+        help='Target BentoService to be deployed, referenced by its name and version '
+        'in format of name:version. For example: "iris_classifier:v1.2.0"',
+    )
+    @click.option(
+        '--instance-type',
+        help='Type of instance will be used for inference. Option applicable to '
+        'platform: AWS SageMaker. Default to "m1.m4.xlarge"',
+        type=click.STRING,
+    )
+    @click.option(
+        '--instance-count',
+        help='Number of instance will be used. Option applicable to platform: AWS '
+        'SageMaker. Default value is 1',
+        type=click.INT,
+    )
+    @click.option(
+        '--num-of-gunicorn-workers-per-instance',
+        help='Number of gunicorn worker will be used per instance. Option applicable '
+        'to platform: AWS SageMaker. Default value for gunicorn worker is '
+        'based on the instance\' cpu core counts. The formula is num_of_cpu/2 + 1',
+        type=click.INT,
+    )
+    @click.option(
+        '--api-name',
+        help='User defined API function will be used for inference. Required for AWS '
+        'SageMaker',
+    )
+    @click.option('-o', '--output', type=click.Choice(['json', 'yaml']), default='json')
+    @click.option(
+        '--wait/--no-wait',
+        default=True,
+        help='Wait for apply action to complete or encounter an error.'
+        'If set to no-wait, CLI will return immediately. The default value is wait',
+    )
+    def update(
+        name,
+        namespace,
+        bento,
+        instance_type,
+        instance_count,
+        num_of_gunicorn_workers_per_instance,
+        api_name,
+        output,
+        wait,
+    ):
+        yatai_client = YataiClient()
+        track_cli('deploy-update')
+        if bento:
+            bento_name, bento_version = bento.split(':')
+        else:
+            bento_name = None
+            bento_version = None
+        try:
+            result = yatai_client.deployment.update_sagemaker_deployment(
+                namespace=namespace,
+                deployment_name=name,
+                bento_name=bento_name,
+                bento_version=bento_version,
+                instance_count=instance_count,
+                instance_type=instance_type,
+                num_of_gunicorn_workers_per_instance=num_of_gunicorn_workers_per_instance,  # noqa E501
+                api_name=api_name,
+            )
+        except BentoMLException as e:
+            _echo(f'Failed to update deployment {name}: {str(e)}', CLI_COLOR_ERROR)
+            return
+        if result.status.status_code != status_pb2.Status.OK:
+            update_deployment_status = result.status
+            _echo(
+                f'Failed to update deployment {name}. '
+                f'{status_pb2.Status.Code.Name(update_deployment_status.status_code)}:'
+                f'{update_deployment_status.error_message}',
+                CLI_COLOR_ERROR,
+            )
+            return
+        else:
+            if wait:
+                result_state = get_state_after_await_action_complete(
+                    yatai_client=yatai_client,
+                    name=name,
+                    namespace=namespace,
+                    message='Updating deployment',
+                )
+                if result_state.status.status_code != status_pb2.Status.OK:
+                    error_code = status_pb2.Status.Code.Name(
+                        result_state.status.status_code
+                    )
+                    _echo(
+                        f'Updated deployment {name}. Failed to retrieve latest status. '
+                        f'{error_code}:{result_state.status.error_message}'
+                    )
+                    return
+                result.deployment.state.CopyFrom(result_state.state)
+        track_cli(
+            'deploy-update-success',
+            deploy_platform=DeploymentSpec.DeploymentOperator.Name(
+                result.deployment.spec.operator
+            ),
+        )
+        _echo(f'Successfully updated deployment {name}', CLI_COLOR_SUCCESS)
+        _print_deployment_info(result.deployment, output)
 
     @deployment.command(help='Apply model service deployment from yaml file')
     @click.option(
@@ -279,6 +487,7 @@ def get_deployment_sub_command():
         '--file',
         'deployment_yaml',
         type=click.File('r'),
+        required=True,
         callback=parse_yaml_file_callback,
     )
     @click.option('-o', '--output', type=click.Choice(['json', 'yaml']), default='json')
@@ -291,17 +500,16 @@ def get_deployment_sub_command():
     def apply(deployment_yaml, output, wait):
         track_cli('deploy-apply', deployment_yaml.get('spec', {}).get('operator'))
         try:
-            deployment_pb = deployment_yaml_to_pb(deployment_yaml)
-            yatai_service = get_yatai_service()
-            result = yatai_service.ApplyDeployment(
-                ApplyDeploymentRequest(deployment=deployment_pb)
-            )
-            if result.status.status_code != Status.OK:
+            yatai_client = YataiClient()
+            result = yatai_client.deployment.apply(deployment_yaml)
+            if result.status.status_code != status_pb2.Status.OK:
                 _echo(
-                    'Failed to apply deployment {name}. code: {error_code}, message: '
-                    '{error_message}'.format(
-                        name=deployment_pb.name,
-                        error_code=Status.Code.Name(result.status.status_code),
+                    'Failed to apply deployment {name}. '
+                    '{error_code}:{error_message}'.format(
+                        name=deployment_yaml.get('name'),
+                        error_code=status_pb2.Status.Code.Name(
+                            result.status.status_code
+                        ),
                         error_message=result.status.error_message,
                     ),
                     CLI_COLOR_ERROR,
@@ -309,144 +517,214 @@ def get_deployment_sub_command():
             else:
                 if wait:
                     result_state = get_state_after_await_action_complete(
-                        yatai_service=yatai_service,
-                        name=deployment_pb.name,
-                        namespace=deployment_pb.namespace,
-                        message='Applying deployment...',
+                        yatai_client=yatai_client,
+                        name=deployment_yaml.get('name'),
+                        namespace=deployment_yaml.get('namespace'),
+                        message='Applying deployment',
                     )
+                    if result_state.status.status_code != status_pb2.Status.OK:
+                        _echo(
+                            'Created deployment {name}, failed to retrieve latest'
+                            ' status. {error_code}:{error_message}'.format(
+                                name=deployment_yaml.get('name'),
+                                error_code=status_pb2.Status.Code.Name(
+                                    result_state.status.status_code
+                                ),
+                                error_message=result_state.status.error_message,
+                            )
+                        )
+                        return
                     result.deployment.state.CopyFrom(result_state.state)
 
+                track_cli(
+                    'deploy-apply-success',
+                    deployment_yaml.get('spec', {}).get('operator'),
+                )
                 _echo(
-                    'Finished apply deployment {}'.format(deployment_pb.name),
+                    'Successfully applied spec to deployment {}'.format(
+                        deployment_yaml.get('name')
+                    ),
                     CLI_COLOR_SUCCESS,
                 )
-                display_deployment_info(result.deployment, output)
+                _print_deployment_info(result.deployment, output)
         except BentoMLException as e:
             _echo(
                 'Failed to apply deployment {name}. Error message: {message}'.format(
-                    name=deployment_pb.name, message=e
+                    name=deployment_yaml.get('name'), message=e
                 )
             )
 
     @deployment.command(help='Delete deployment')
     @click.argument("name", type=click.STRING, required=True)
-    @click.option('--namespace', type=click.STRING, help='Deployment namespace')
-    def delete(name, namespace):
-        track_cli('deploy-delete')
-
-        result = get_yatai_service().DeleteDeployment(
-            DeleteDeploymentRequest(deployment_name=name, namespace=namespace)
+    @click.option(
+        '-n',
+        '--namespace',
+        type=click.STRING,
+        help='Deployment namespace managed by BentoML, default value is "default" which'
+        'can be changed in BentoML configuration file',
+    )
+    @click.option(
+        '--force',
+        is_flag=True,
+        help='force delete the deployment record in database and '
+        'ignore errors when deleting cloud resources',
+    )
+    def delete(name, namespace, force):
+        yatai_client = YataiClient()
+        get_deployment_result = yatai_client.deployment.get(namespace, name)
+        if get_deployment_result.status.status_code != status_pb2.Status.OK:
+            _echo(
+                'Failed to get deployment {} for deletion. {}:{}'.format(
+                    name,
+                    status_pb2.Status.Code.Name(
+                        get_deployment_result.status.status_code
+                    ),
+                    get_deployment_result.status.error_message,
+                ),
+                CLI_COLOR_ERROR,
+            )
+            return
+        platform = DeploymentSpec.DeploymentOperator.Name(
+            get_deployment_result.deployment.spec.operator
         )
-        if result.status.status_code != Status.OK:
+        track_cli('deploy-delete', platform)
+        result = yatai_client.deployment.delete(name, namespace, force)
+        if result.status.status_code == status_pb2.Status.OK:
+            extra_properties = {}
+            if get_deployment_result.deployment.created_at:
+                stopped_time = datetime.utcnow()
+                extra_properties['uptime'] = int(
+                    (
+                        stopped_time
+                        - get_deployment_result.deployment.created_at.ToDatetime()
+                    ).total_seconds()
+                )
+            track_cli('deploy-delete-success', platform, extra_properties)
+            _echo(
+                'Successfully deleted deployment "{}"'.format(name), CLI_COLOR_SUCCESS
+            )
+        else:
             _echo(
                 'Failed to delete deployment {name}. code: {error_code}, message: '
                 '{error_message}'.format(
                     name=name,
-                    error_code=Status.Code.Name(result.status.status_code),
+                    error_code=status_pb2.Status.Code.Name(result.status.status_code),
                     error_message=result.status.error_message,
                 ),
                 CLI_COLOR_ERROR,
             )
-        else:
-            _echo('Successfully delete deployment {}'.format(name), CLI_COLOR_SUCCESS)
 
-    @deployment.command(help='Get deployment spec')
+    @deployment.command(help='Get deployment current state')
     @click.argument("name", type=click.STRING, required=True)
-    @click.option('--namespace', type=click.STRING, help='Deployment namespace')
-    @click.option('--output', type=click.Choice(['json', 'yaml']), default='json')
+    @click.option('-n', '--namespace', type=click.STRING, help='Deployment namespace')
+    @click.option('-o', '--output', type=click.Choice(['json', 'yaml']), default='json')
     def get(name, output, namespace):
         track_cli('deploy-get')
 
-        result = get_yatai_service().GetDeployment(
-            GetDeploymentRequest(deployment_name=name, namespace=namespace)
-        )
-        if result.status.status_code != Status.OK:
+        yatai_client = YataiClient()
+        result = yatai_client.deployment.get(namespace, name)
+        if result.status.status_code != status_pb2.Status.OK:
             _echo(
                 'Failed to get deployment {name}. code: {error_code}, message: '
                 '{error_message}'.format(
                     name=name,
-                    error_code=Status.Code.Name(result.status.status_code),
+                    error_code=status_pb2.Status.Code.Name(result.status.status_code),
                     error_message=result.status.error_message,
                 ),
                 CLI_COLOR_ERROR,
             )
         else:
-            display_deployment_info(result.deployment, output)
+            _print_deployment_info(result.deployment, output)
 
-    @deployment.command(help='Get deployment state')
+    @deployment.command(help='View the detailed state of the deployment')
     @click.argument("name", type=click.STRING, required=True)
-    @click.option('--namespace', type=click.STRING, help='Deployment namespace')
-    @click.option('--output', type=click.Choice(['json', 'yaml']), default='json')
+    @click.option(
+        '-n',
+        '--namespace',
+        type=click.STRING,
+        help='Deployment namespace managed by BentoML, default value is "default" which'
+        'can be changed in BentoML configuration file',
+    )
+    @click.option('-o', '--output', type=click.Choice(['json', 'yaml']), default='json')
     def describe(name, output, namespace):
         track_cli('deploy-describe')
-        yatai_service = get_yatai_service()
+        yatai_client = YataiClient()
 
-        result = yatai_service.DescribeDeployment(
-            DescribeDeploymentRequest(deployment_name=name, namespace=namespace)
-        )
-        if result.status.status_code != Status.OK:
+        result = yatai_client.deployment.describe(namespace, name)
+        if result.status.status_code != status_pb2.Status.OK:
             _echo(
-                'Failed to describe deployment {name}. code: {error_code}, message: '
+                'Failed to describe deployment {name}. {error_code}:'
                 '{error_message}'.format(
                     name=name,
-                    error_code=Status.Code.Name(result.status.status_code),
+                    error_code=status_pb2.Status.Code.Name(result.status.status_code),
                     error_message=result.status.error_message,
                 ),
                 CLI_COLOR_ERROR,
             )
         else:
-            get_response = yatai_service.GetDeployment(
-                GetDeploymentRequest(deployment_name=name, namespace=namespace)
-            )
-            deployment_pb = get_response.deployment
+            get_result = yatai_client.deployment.get(namespace, name)
+            if get_result.status.status_code != status_pb2.Status.OK:
+                _echo(
+                    'Failed to describe deployment {name}. {error_code}:'
+                    '{error_message}'.format(
+                        name=name,
+                        error_code=status_pb2.Status.Code.Name(
+                            result.status.status_code
+                        ),
+                        error_message=result.status.error_message,
+                    ),
+                    CLI_COLOR_ERROR,
+                )
+            deployment_pb = get_result.deployment
             deployment_pb.state.CopyFrom(result.state)
-            display_deployment_info(deployment_pb, output)
+            _print_deployment_info(deployment_pb, output)
 
-    @deployment.command(name="list", help='List deployments')
-    @click.option('--namespace', type=click.STRING)
-    @click.option('--all-namespace', type=click.BOOL, default=False)
+    @deployment.command(name="list", help='List active deployments')
+    @click.option(
+        '-n',
+        '--namespace',
+        type=click.STRING,
+        help='Deployment namespace managed by BentoML, default value is "default" which'
+        'can be changed in BentoML configuration file',
+    )
+    @click.option('--all-namespaces', is_flag=True)
     @click.option(
         '--limit', type=click.INT, help='Limit how many deployments will be retrieved'
     )
     @click.option(
         '--filters',
         type=click.STRING,
-        help='Filter retrieved deployments with keywords',
+        help='List deployments containing the filter string in name or version',
     )
     @click.option(
-        '--labels', type=click.STRING, help='List deployments with the giving labels'
+        '-l',
+        '--labels',
+        type=click.STRING,
+        help='List deployments matching the giving labels',
     )
-    @click.option('--output', type=click.Choice(['json', 'yaml']), default='json')
-    def list_deployments(output, limit, filters, labels, namespace, all_namespace):
+    @click.option(
+        '-o', '--output', type=click.Choice(['json', 'yaml', 'table']), default='table'
+    )
+    def list_deployments_cli(output, limit, filters, labels, namespace, all_namespaces):
         track_cli('deploy-list')
+        yatai_client = YataiClient()
 
-        if all_namespace:
-            if namespace is not None:
-                logger.warning(
-                    'Ignoring `namespace=%s` due to the --all-namespace flag presented',
-                    namespace,
-                )
-            namespace = ALL_NAMESPACE_TAG
-
-        result = get_yatai_service().ListDeployments(
-            ListDeploymentsRequest(
-                limit=limit,
-                filter=filters,
-                labels=parse_key_value_pairs(labels),
-                namespace=namespace,
-            )
+        result = yatai_client.deployment.list(
+            limit=limit,
+            filters=filters,
+            labels=parse_key_value_pairs(labels),
+            namespace=namespace,
+            is_all_namespaces=all_namespaces,
         )
-        if result.status.status_code != Status.OK:
+        if result.status.status_code != status_pb2.Status.OK:
             _echo(
-                'Failed to list deployments. code: {error_code}, message: '
-                '{error_message}'.format(
-                    error_code=Status.Code.Name(result.status.status_code),
+                'Failed to list deployments. {error_code}:{error_message}'.format(
+                    error_code=status_pb2.Status.Code.Name(result.status.status_code),
                     error_message=result.status.error_message,
                 ),
                 CLI_COLOR_ERROR,
             )
         else:
-            for deployment_pb in result.deployments:
-                display_deployment_info(deployment_pb, output)
+            _print_deployments_info(result.deployments, output)
 
     return deployment

@@ -18,13 +18,22 @@ from __future__ import print_function
 
 import os
 
-from bentoml.artifact import ArtifactSpec, ArtifactInstance
+from bentoml.artifact import BentoServiceArtifact, BentoServiceArtifactWrapper
 from bentoml.utils import cloudpickle
+from bentoml.exceptions import MissingDependencyException, InvalidArgument
 
 
-class PytorchModelArtifact(ArtifactSpec):
+class PytorchModelArtifact(BentoServiceArtifact):
     """
     Abstraction for saving/loading objects with torch.save and torch.load
+
+    Args:
+        name (string): name of the artifact
+
+    Raises:
+        MissingDependencyException: torch package is required for PytorchModelArtifact
+        InvalidArgument: invalid argument type, model being packed must be instance of
+            torch.nn.Module
     """
 
     def __init__(self, name, file_extension=".pt"):
@@ -35,18 +44,20 @@ class PytorchModelArtifact(ArtifactSpec):
         return os.path.join(base_path, self.name + self._file_extension)
 
     def pack(self, model):  # pylint:disable=arguments-differ
-        return _PytorchModelArtifactInstance(self, model)
+        return _PytorchModelArtifactWrapper(self, model)
 
     def load(self, path):
         try:
             import torch
         except ImportError:
-            raise ImportError("torch package is required to use PytorchModelArtifact")
+            raise MissingDependencyException(
+                "torch package is required to use PytorchModelArtifact"
+            )
 
         model = cloudpickle.load(open(self._file_path(path), 'rb'))
 
         if not isinstance(model, torch.nn.Module):
-            raise TypeError(
+            raise InvalidArgument(
                 "Expecting PytorchModelArtifact loaded object type to be "
                 "'torch.nn.Module' but actually it is {}".format(type(model))
             )
@@ -54,17 +65,21 @@ class PytorchModelArtifact(ArtifactSpec):
         return self.pack(model)
 
 
-class _PytorchModelArtifactInstance(ArtifactInstance):
+class _PytorchModelArtifactWrapper(BentoServiceArtifactWrapper):
     def __init__(self, spec, model):
-        super(_PytorchModelArtifactInstance, self).__init__(spec)
+        super(_PytorchModelArtifactWrapper, self).__init__(spec)
 
         try:
             import torch
         except ImportError:
-            raise ImportError("torch package is required to use PytorchModelArtifact")
+            raise MissingDependencyException(
+                "torch package is required to use PytorchModelArtifact"
+            )
 
         if not isinstance(model, torch.nn.Module):
-            raise TypeError("PytorchModelArtifact can only pack type 'torch.nn.Module'")
+            raise InvalidArgument(
+                "PytorchModelArtifact can only pack type 'torch.nn.Module'"
+            )
 
         self._model = model
 

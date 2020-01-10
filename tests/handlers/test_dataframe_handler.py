@@ -2,10 +2,9 @@ import pytest
 import pandas as pd
 import numpy as np
 
-from bentoml.handlers.dataframe_handler import (
-    DataframeHandler,
-    check_dataframe_column_contains,
-)
+from bentoml.handlers import DataframeHandler
+from bentoml.handlers.dataframe_handler import _check_dataframe_column_contains
+from bentoml.exceptions import BadInput
 
 try:
     from unittest.mock import Mock
@@ -59,12 +58,12 @@ def test_dataframe_handle_aws_lambda_event():
     assert success_response["statusCode"] == 200
     assert success_response["body"] == '"john"'
 
-    error_event_obj = {
-        "headers": {"Content-Type": "this_will_fail"},
-        "body": test_content,
-    }
-    error_response = handler.handle_aws_lambda_event(error_event_obj, test_func)
-    assert error_response["statusCode"] == 400
+    with pytest.raises(BadInput):
+        error_event_obj = {
+            "headers": {"Content-Type": "this_will_fail"},
+            "body": test_content,
+        }
+        handler.handle_aws_lambda_event(error_event_obj, test_func)
 
 
 def test_check_dataframe_column_contains():
@@ -73,20 +72,21 @@ def test_check_dataframe_column_contains():
     )
 
     # this should pass
-    check_dataframe_column_contains({"a": "int", "b": "int", "c": "int"}, df)
-    check_dataframe_column_contains({"a": "int"}, df)
-    check_dataframe_column_contains({"a": "int", "c": "int"}, df)
+    _check_dataframe_column_contains({"a": "int", "b": "int", "c": "int"}, df)
+    _check_dataframe_column_contains({"a": "int"}, df)
+    _check_dataframe_column_contains({"a": "int", "c": "int"}, df)
 
     # this should raise exception
-    with pytest.raises(ValueError) as e:
-        check_dataframe_column_contains({"required_column_x": "int"}, df)
-    assert str(e.value).startswith("Missing columns: required_column_x")
+    with pytest.raises(BadInput) as e:
+        _check_dataframe_column_contains({"required_column_x": "int"}, df)
+    assert "Missing columns: required_column_x" in str(e.value)
 
-    with pytest.raises(ValueError) as e:
-        check_dataframe_column_contains(
+    with pytest.raises(BadInput) as e:
+        _check_dataframe_column_contains(
             {"a": "int", "b": "int", "d": "int", "e": "int"}, df
         )
-    assert str(e.value).startswith("Missing columns:")
+    assert "Missing columns:" in str(e.value)
+    assert "required_column:" in str(e.value)
 
 
 def test_dataframe_handle_request_csv():

@@ -21,28 +21,23 @@ It offer remote Jupyter notebook for building model and help you train and deplo
 
 ## Deploy to AWS SageMaker with BentoML
 
-After you exported your model with BentoML, you can invoke `bentoml deploy` command for SageMaker deployment. You can invoke that command either inside the Jupyter notebook or inside your terminal.
-Update `/ARCHIVED_PATH` with your saved BentoML archive path and run the following command
+After you exported your model with BentoML, you can invoke `bentoml deployment create` command for SageMaker deployment. You can invoke that command either inside the Jupyter notebook or inside your terminal.
+Update `BENTO_NAME` and `BENTO_VERSION` with your saved BentoML service's inforamtion and run the following command
 
 ```bash
-bentoml deploy /ARCHIVED_PATH --platform=aws-sagemaker --region=AWS_REGION --api-name=predict
+bentoml deployment create sentiment-sagemaker --bento BENTO_NAME:BENTO_VERSION --platform=aws-sagemaker --region=AWS_REGION --api-name=predict
 ```
 
-After you invoke the command, BentoML will first generated a snapshot of this model archive in your local file system with additional files for AWS SageMaker.
+![ScreenShot](./deploying-sagemaker.png)
 
-After you invoke deploy command, BentoML will perform serveal operations for SageMaker deployment.
+After you invoke the command, BentoML will first generated a snapshot of this model archive in your local file system with files for AWS SageMaker.
 
-First, BentoML will generate snapshot of this deployment in your local file system.  The default snapshot location is `~/bentoml/deployments`.
-It will place the snapshot in the format of `platform/model_archive_name/model_archive_version/timestamp`
-
-![ScreenShot](./file-struc.png)
+After you invoke deploy command, BentoML will perform few operations for SageMaker deployment.
 
 BentoML will use docker to build an image with the snapshot archive and then push the image to AWS ECR(Elasitc Container Registry)
 
 BentoML will build a docker image from the snapshot and then push the image to AWS ECR. If you run `docker images` command in your terminal. You will see the built docker image.
 You can also expect to see the same image in your AWS ECR dashboard.
-
-![ScreenShot](./docker-image.png)
 
 ![ScreenShot](./aws-ecr.png)
 
@@ -61,28 +56,32 @@ BentoML will create SageMaker endpoint base on the endpoint configuration we cre
 
 To test the newly deployed model.  We can use AWS cli to make prediction.  The result will be stored as JSON format in an output file.
 
-![ScreenShot](./test-prediction.png)
-
 You can invoke the example model with following command.
 
 ```bash
 aws sagemaker-runtime invoke-endpoint \
---endpoint-name SentimentLRModel \
+--endpoint-name default-SentimentLRModel \
 --body '["sweet food", "bad food", "happy day"]' \
 --content-type "application/json" \
 output.json
 ```
 
+![ScreenShot](./test-prediction.png)
+
 ## Check deployment status
 
 ```bash
-bentoml check-deployment-status /ARCHIVED_PATH --platform=aws-sagemaker --region=AWS_REGION
+bentoml deployment describe my-sagemaker-deployment
 ```
+
+![ScreenShot](./describe-deployment.png)
 
 ## Delete deployment
 
 Delete a SageMaker deployment is as easy as deploying it.
 
 ```bash
-bentoml delete-deployment /ARCHIVED_PATH --platform=aws-sagemaker --region=AWS_REGION
+bentoml deployment delete my-sagemaker-deployment
 ```
+
+![ScreenShot](./delete-deployment.png)

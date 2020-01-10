@@ -23,93 +23,92 @@ install_requires = [
     "numpy",
     "flask",
     "gunicorn",
-    "six",
-    "click",
+    "click>=7.0",
     "pandas",
-    "dill",
     "prometheus_client",
     "python-json-logger",
     "boto3",
-    "pathlib2",
     "requests",
     "packaging",
     "docker",
     "configparser",
-    "sqlalchemy",
+    "sqlalchemy>=1.3.0",
     "protobuf>=3.6.0",
     "grpcio",
     "cerberus",
+    "tabulate",
+    "humanfriendly",
+    "alembic",
+    # python-dateutil required by pandas and boto3, this makes sure the version
+    # works for both
+    "python-dateutil>=2.1,<2.8.1",
 ]
 
 imageio = ["imageio>=2.5.0"]
-cv2 = ["opencv-python"]
 pytorch = ["torch", "torchvision"]
 fastai = ["fastai", "matplotlib"]
 tensorflow = ["tensorflow"]
 xgboost = ["xgboost"]
 h2o = ["h2o"]
-api_server = ["gunicorn", "prometheus_client", "Werkzeug"]
+api_server = ["gunicorn", "prometheus_client"]
+aws_sam_cli = ["aws-sam-cli==0.33.1"]
 
-optional_requires = api_server + imageio + pytorch + tensorflow + fastai + xgboost + h2o
+optional_requires = (
+    api_server + imageio + pytorch + tensorflow + fastai + xgboost + h2o + aws_sam_cli
+)
 
-tests_require = (
+test_requires = (
     [
-        "pytest==4.1.0",
-        "pytest-cov==2.7.1",
-        "snapshottest==0.5.0",
-        "mock==2.0.0",
-        "tox==3.12.1",
+        "pytest>=4.1.0",
+        "pytest-cov>=2.7.1",
+        "mock>=2.0.0",
         "coverage>=4.4",
         "codecov",
+        "moto",
+        "numpy",
     ]
     + imageio
-    + cv2
-    + fastai
+    + aws_sam_cli
 )
 
 dev_requires = [
-    "pylint==2.3.1",
+    "tox>=3.12.1",
+    "tox-conda>=0.2.0",
     "flake8",
-    "tox-conda==0.2.0",
     "twine",
-    "black",
     "setuptools",
     "gitpython>=2.0.2",
     "grpcio-tools",
-] + tests_require
+    "pylint>=2.3.1",
+    "black",
+]
 
-sphinx_requires = [
+
+docs_requires = [
     "sphinx",
     "sphinx-click",
     "sphinx_rtd_theme",
     "sphinxcontrib-fulltoc",
+    "recommonmark",
 ]
 
-doc_builder_requires = sphinx_requires + install_requires
-
-dev_all = install_requires + dev_requires + optional_requires + sphinx_requires
+dev_all = install_requires + dev_requires + optional_requires + docs_requires
 
 extras_require = {
     "all": dev_all,
-    "api_server": api_server,
     "dev": dev_requires,
-    "doc_builder": doc_builder_requires,
-    "pytorch": pytorch,
-    "tensorflow": tensorflow,
-    "imageio": imageio,
-    "test": tests_require,
-    "fastai": fastai,
-    "xgboost": xgboost,
-    "h2o": h2o,
+    "api_server": api_server,
+    "test": test_requires,
+    "doc_builder": docs_requires + install_requires,  # required by readthedocs.io
 }
 
 setuptools.setup(
     name="BentoML",
     version=versioneer.get_version(),
     cmdclass=versioneer.get_cmdclass(),
-    author="atalaya.io",
-    author_email="contact@atalaya.io",
-    description="A python framework for serving and operating machine learning models",
+    author="bentoml.org",
+    description="A platform for serving and deploying machine learning models in the "
+    "cloud",
     long_description=long_description,
     long_description_content_type="text/markdown",
     install_requires=install_requires,
@@ -117,14 +116,13 @@ setuptools.setup(
     url="https://github.com/bentoml/BentoML",
     packages=setuptools.find_packages(exclude=["tests*"]),
     classifiers=[
-        "Programming Language :: Python :: 2.7",
         "Programming Language :: Python :: 3.6",
         "Programming Language :: Python :: 3.7",
         "Programming Language :: Python :: Implementation :: CPython",
         "License :: OSI Approved :: Apache Software License",
         "Operating System :: OS Independent",
     ],
-    python_requires=">=2.7, !=3.0.*, !=3.1.*, !=3.2.*, !=3.3.*",
+    python_requires=">=3.4",
     entry_points={"console_scripts": ["bentoml=bentoml.cli:cli"]},
     project_urls={
         "Bug Reports": "https://github.com/bentoml/BentoML/issues",

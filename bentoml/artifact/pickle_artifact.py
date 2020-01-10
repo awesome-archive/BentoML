@@ -18,28 +18,27 @@ from __future__ import print_function
 
 import os
 
-import dill
-from six import string_types
-
-from bentoml.artifact import ArtifactSpec, ArtifactInstance
+from bentoml.utils import cloudpickle
+from bentoml.artifact import BentoServiceArtifact, BentoServiceArtifactWrapper
 
 
-class PickleArtifact(ArtifactSpec):
+class PickleArtifact(BentoServiceArtifact):
     """Abstraction for saving/loading python objects with pickle serialization
 
     Args:
         name (str): Name for the artifact
         pickle_module (module|str): The python module will be used for pickle
-            and unpickle artifact
+            and unpickle artifact, default pickle module in BentoML's fork of
+            `cloudpickle`, which is identical to the Apache Spark fork
         pickle_extension (str): The extension format for pickled file.
     """
 
-    def __init__(self, name, pickle_module=dill, pickle_extension=".pkl"):
+    def __init__(self, name, pickle_module=cloudpickle, pickle_extension=".pkl"):
         super(PickleArtifact, self).__init__(name)
 
         self._pickle_extension = pickle_extension
 
-        if isinstance(pickle_module, string_types):
+        if isinstance(pickle_module, str):
             self._pickle = __import__(pickle_module)
         else:
             self._pickle = pickle_module
@@ -48,7 +47,7 @@ class PickleArtifact(ArtifactSpec):
         return os.path.join(base_path, self.name + self._pickle_extension)
 
     def pack(self, obj):  # pylint:disable=arguments-differ
-        return _PickleArtifactInstance(self, obj)
+        return _PickleArtifactWrapper(self, obj)
 
     def load(self, path):
         with open(self._pkl_file_path(path), "rb") as pkl_file:
@@ -56,9 +55,9 @@ class PickleArtifact(ArtifactSpec):
         return self.pack(obj)
 
 
-class _PickleArtifactInstance(ArtifactInstance):
+class _PickleArtifactWrapper(BentoServiceArtifactWrapper):
     def __init__(self, spec, obj):
-        super(_PickleArtifactInstance, self).__init__(spec)
+        super(_PickleArtifactWrapper, self).__init__(spec)
 
         self._obj = obj
 

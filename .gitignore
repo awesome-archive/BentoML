@@ -70,7 +70,7 @@ instance/
 .scrapy
 
 # Sphinx documentation
-docs/_build/
+docs/build/
 
 # PyBuilder
 target/
@@ -115,9 +115,10 @@ package.json
 node_modules/
 yarn-error.log
 yarn.lock
-
-# docs
-built-docs
+package-lock.json
 
 # MacOS X
 .DS_Store
+
+# sqlite
+storage.db

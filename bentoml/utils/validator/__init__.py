@@ -19,13 +19,15 @@ from __future__ import print_function
 from cerberus import Validator
 
 from bentoml.utils import ProtoMessageToDict
-from bentoml.proto.deployment_pb2 import DeploymentSpec
+from bentoml.proto.deployment_pb2 import DeploymentSpec, DeploymentState
 
 deployment_schema = {
     'name': {'type': 'string', 'required': True, 'minlength': 4},
-    'namespace': {'type': 'string', 'required': True, 'minlength': 4},
+    'namespace': {'type': 'string', 'required': True, 'minlength': 3},
     'labels': {'type': 'dict', 'allow_unknown': True},
     'annotations': {'type': 'dict', 'allow_unknown': True},
+    'created_at': {'type': 'string'},
+    'last_updated_at': {'type': 'string'},
     'spec': {
         'type': 'dict',
         'required': True,
@@ -47,19 +49,24 @@ deployment_schema = {
             'sagemaker_operator_config': {
                 'type': 'dict',
                 'schema': {
+                    'api_name': {'type': 'string', 'required': True, 'minlength': 3},
+                    'instance_type': {'type': 'string', 'required': True},
+                    'instance_count': {'type': 'integer', 'min': 1, 'required': True},
                     'region': {'type': 'string'},
-                    'api_name': {'type': 'string', 'required': True},
-                    'instance_type': {'type': 'string'},
-                    'instance_count': {'type': 'integer', 'min': 1},
+                    'num_of_gunicorn_workers_per_instance': {
+                        'type': 'integer',
+                        'min': 1,
+                    },
                 },
             },
             'aws_lambda_operator_config': {
                 'type': 'dict',
-                'schema': {'region': {'type': 'string', 'required': True}},
-            },
-            'gcp_function_operator_config': {
-                'type': 'dict',
-                'schema': {'region': {'type': 'string', 'required': True}},
+                'schema': {
+                    'region': {'type': 'string'},
+                    'api_name': {'type': 'string', 'minlength': 3},
+                    'memory_size': {'type': 'integer', 'aws_lambda_memory': True},
+                    'timeout': {'type': 'integer', 'min': 1, 'max': 900},
+                },
             },
             'kubernetes_operator_config': {
                 'type': 'dict',
@@ -75,17 +82,40 @@ deployment_schema = {
     'state': {
         'type': 'dict',
         'schema': {
-            'state': {'type': 'integer'},
+            'state': {'type': 'string', 'allowed': DeploymentState.State.keys()},
             'error_message': {'type': 'string'},
             'info_json': {'type': 'string'},
+            'timestamp': {'type': 'string'},
         },
     },
 }
 
 
+class YataiDeploymentValidator(Validator):
+    def _validate_aws_lambda_memory(self, aws_lambda_memory, field, value):
+        """ Test the memory size restriction for AWS Lambda.
+
+        The rule's arguments are validated against this schema:
+        {'type': 'integer'}
+        """
+        if aws_lambda_memory:
+            if value > 3008 or value < 128:
+                self._error(
+                    field,
+                    'AWS Lambda memory must be between 128 MB to 3,008 MB, '
+                    'in 64 MB increments.',
+                )
+            if value % 64 > 0:
+                self._error(
+                    field,
+                    'AWS Lambda memory must be between 128 MB to 3,008 MB, '
+                    'in 64 MB increments.',
+                )
+
+
 def validate_pb_schema(pb, schema):
     pb_dict = ProtoMessageToDict(pb)
-    v = Validator(schema)
+    v = YataiDeploymentValidator(schema)
     if v.validate(pb_dict):
         return None
     else:

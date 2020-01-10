@@ -16,57 +16,68 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-from six import add_metaclass
 from abc import abstractmethod, ABCMeta
 
 from bentoml.proto.deployment_pb2 import DeploymentSpec
-from bentoml.exceptions import BentoMLDeploymentException
+from bentoml.exceptions import YataiDeploymentException
 
 
-def get_deployment_operator(deployment_pb):
+def get_deployment_operator(yatai_service, deployment_pb):
     operator = deployment_pb.spec.operator
 
     if operator == DeploymentSpec.AWS_SAGEMAKER:
         from bentoml.deployment.sagemaker import SageMakerDeploymentOperator
 
-        return SageMakerDeploymentOperator()
+        return SageMakerDeploymentOperator(yatai_service)
     elif operator == DeploymentSpec.AWS_LAMBDA:
-        from bentoml.deployment.serverless.aws_lambda import AwsLambdaDeploymentOperator
+        from bentoml.deployment.aws_lambda import AwsLambdaDeploymentOperator
 
-        return AwsLambdaDeploymentOperator()
+        return AwsLambdaDeploymentOperator(yatai_service)
     elif operator == DeploymentSpec.GCP_FUNCTION:
-        from bentoml.deployment.serverless.gcp_function import (
-            GcpFunctionDeploymentOperator,
+        raise NotImplementedError(
+            "GCP Function deployment operator is not supported in current version of "
+            "BentoML"
         )
-
-        return GcpFunctionDeploymentOperator()
     elif operator == DeploymentSpec.KUBERNETES:
-        raise NotImplementedError("Kubernetes deployment operator is not implemented")
+        raise NotImplementedError(
+            "Kubernetes deployment operator is not supported in current version of "
+            "BentoML"
+        )
     elif operator == DeploymentSpec.CUSTOM:
-        raise NotImplementedError("Custom deployment operator is not implemented")
+        raise NotImplementedError(
+            "Custom deployment operator is not supported in current version of BentoML"
+        )
     else:
-        raise BentoMLDeploymentException("DeployOperator must be set")
+        raise YataiDeploymentException("DeployOperator must be set")
 
 
-@add_metaclass(ABCMeta)
 class DeploymentOperatorBase(object):
+    def __init__(self, yatai_service):
+        self.yatai_service = yatai_service
+
+    __metaclass__ = ABCMeta
+
     @abstractmethod
-    def apply(self, deployment_pb, repo, prev_deployment):
+    def add(self, deployment_pb):
         """
         Create deployment based on deployment_pb spec - the bento name and version
         must be found in the given BentoRepository
         """
 
     @abstractmethod
-    def delete(self, deployment_pb, repo):
+    def update(self, deployment_pb, previous_deployment):
         """
-        Delete deployment based on deployment_pb spec - the bento name and version
-        must be found in the given BentoRepository
+        Update existing deployment based on deployment_pb spec
         """
 
     @abstractmethod
-    def describe(self, deployment_pb, repo):
+    def delete(self, deployment_pb):
         """
-        Fetch status on an existing deployment created with deployment_pb spec - the
-        bento name and version must be found in the given BentoRepository
+        Delete deployment based on deployment_pb spec
+        """
+
+    @abstractmethod
+    def describe(self, deployment_pb):
+        """
+        Fetch current state of an existing deployment created with deployment_pb spec
         """

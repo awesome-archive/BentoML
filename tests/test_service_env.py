@@ -1,36 +1,13 @@
 import os
 
 import bentoml
-
-
-def test_requirement_txt_env(tmpdir):
-    req_txt_file = tmpdir.join("requirements.txt")
-    with open(str(req_txt_file), 'wb') as f:
-        f.write(b"numpy\npandas\ntorch")
-
-    @bentoml.env(requirements_txt=str(req_txt_file))
-    class ServiceWithFile(bentoml.BentoService):
-        @bentoml.api(bentoml.handlers.DataframeHandler)
-        def predict(self, df):
-            return df
-
-    service_with_file = ServiceWithFile()
-    assert 'numpy' in service_with_file.env._pip_dependencies
-    assert 'pandas' in service_with_file.env._pip_dependencies
-    assert 'torch' in service_with_file.env._pip_dependencies
-
-    saved_path = service_with_file.save('/tmp')
-    with open(os.path.join(saved_path, 'requirements.txt'), 'rb') as f:
-        content = f.read().decode('utf-8')
-        assert 'numpy' in content
-        assert 'pandas' in content
-        assert 'torch' in content
+from bentoml.handlers import DataframeHandler
 
 
 def test_pip_dependencies_env():
-    @bentoml.env(pip_dependencies="numpy")
+    @bentoml.env(pip_dependencies=["numpy"])
     class ServiceWithString(bentoml.BentoService):
-        @bentoml.api(bentoml.handlers.DataframeHandler)
+        @bentoml.api(DataframeHandler)
         def predict(self, df):
             return df
 
@@ -39,7 +16,7 @@ def test_pip_dependencies_env():
 
     @bentoml.env(pip_dependencies=['numpy', 'pandas', 'torch'])
     class ServiceWithList(bentoml.BentoService):
-        @bentoml.api(bentoml.handlers.DataframeHandler)
+        @bentoml.api(DataframeHandler)
         def predict(self, df):
             return df
 
@@ -49,10 +26,10 @@ def test_pip_dependencies_env():
     assert 'torch' in service_with_list.env._pip_dependencies
 
 
-def test_pip_dependencies_with_archive(tmpdir):
+def test_service_env_pip_dependencies(tmpdir):
     @bentoml.env(pip_dependencies=['numpy', 'pandas', 'torch'])
     class ServiceWithList(bentoml.BentoService):
-        @bentoml.api(bentoml.handlers.DataframeHandler)
+        @bentoml.api(DataframeHandler)
         def predict(self, df):
             return df
 

@@ -20,9 +20,10 @@ import os
 import json
 import argparse
 
-from flask import Response, make_response, jsonify
+from flask import Response
 
-from bentoml.handlers.base_handlers import BentoHandler, get_output_str
+from bentoml.exceptions import BadInput
+from bentoml.handlers.base_handlers import BentoHandler, api_func_result_to_json
 
 
 class JsonHandler(BentoHandler):
@@ -35,24 +36,19 @@ class JsonHandler(BentoHandler):
         if request.content_type == "application/json":
             parsed_json = json.loads(request.data.decode("utf-8"))
         else:
-            return make_response(
-                jsonify(
-                    message="Request content-type must be 'application/json'"
-                    "for this BentoService API"
-                ),
-                400,
+            raise BadInput(
+                "Request content-type must be 'application/json' for this "
+                "BentoService API"
             )
 
         result = func(parsed_json)
-        result = get_output_str(result, request.headers.get("output", "json"))
-        return Response(response=result, status=200, mimetype="application/json")
+        json_output = api_func_result_to_json(result)
+        return Response(response=json_output, status=200, mimetype="application/json")
 
     def handle_cli(self, args, func):
         parser = argparse.ArgumentParser()
         parser.add_argument("--input", required=True)
-        parser.add_argument(
-            "-o", "--output", default="str", choices=["str", "json", "yaml"]
-        )
+        parser.add_argument("-o", "--output", default="str", choices=["str", "json"])
         parsed_args = parser.parse_args(args)
 
         if os.path.isfile(parsed_args.input):
@@ -63,46 +59,21 @@ class JsonHandler(BentoHandler):
 
         input_json = json.loads(content)
         result = func(input_json)
-        result = get_output_str(result, parsed_args.output)
+        if parsed_args.output == 'json':
+            result = api_func_result_to_json(result)
+        else:
+            result = str(result)
         print(result)
 
     def handle_aws_lambda_event(self, event, func):
         if event["headers"]["Content-Type"] == "application/json":
             parsed_json = json.loads(event["body"])
         else:
-            return {"statusCode": 400, "body": "Only accept json as content type"}
+            raise BadInput(
+                "Request content-type must be 'application/json' for this "
+                "BentoService API lambda endpoint"
+            )
 
         result = func(parsed_json)
-        result = get_output_str(result, event["headers"].get("output", "json"))
-        return {"statusCode": 200, "body": result}
-
-    def handle_clipper_strings(self, inputs, func):
-        def transform_and_predict(input_string):
-            data = json.loads(input_string)
-            return func(data)
-
-        return list(map(transform_and_predict, inputs))
-
-    def handle_clipper_bytes(self, inputs, func):
-        raise RuntimeError(
-            "JsonHandler doesn't support 'bytes' input type \
-                for clipper deployment at the moment"
-        )
-
-    def handle_clipper_ints(self, inputs, func):
-        raise RuntimeError(
-            "JsonHandler doesn't support ints input types \
-                for clipper deployment at the moment"
-        )
-
-    def handle_clipper_doubles(self, inputs, func):
-        raise RuntimeError(
-            "JsonHandler doesn't support doubles input types \
-                for clipper deployment at the moment"
-        )
-
-    def handle_clipper_floats(self, inputs, func):
-        raise RuntimeError(
-            "JsonHandler doesn't support floats input types \
-                for clipper deployment at the moment"
-        )
+        json_output = api_func_result_to_json(result)
+        return {"statusCode": 200, "body": json_output}

@@ -17,18 +17,19 @@ from __future__ import division
 from __future__ import print_function
 
 import os
+import json
 import shutil
-from six import add_metaclass
+import boto3
+from pathlib import Path
 from abc import abstractmethod, ABCMeta
+from urllib.parse import urlparse
 
 from bentoml import config
-from bentoml.exceptions import BentoMLRepositoryException
+from bentoml.exceptions import YataiRepositoryException
 from bentoml.utils.s3 import is_s3_url
-from bentoml.utils import Path
 from bentoml.proto.repository_pb2 import BentoUri
 
 
-@add_metaclass(ABCMeta)
 class BentoRepositoryBase(object):
     """
     BentoRepository is the interface for managing saved Bentos over file system or
@@ -38,6 +39,8 @@ class BentoRepositoryBase(object):
     easily load back to a Python session, installed as PyPI package, or run in Conda
     or docker environment with all dependencies configured automatically
     """
+
+    __metaclass__ = ABCMeta
 
     @abstractmethod
     def add(self, bento_name, bento_version):
@@ -73,10 +76,10 @@ class _LocalBentoRepository(BentoRepositoryBase):
         self.uri_type = BentoUri.LOCAL
 
     def add(self, bento_name, bento_version):
-        # Full path containing saved BentoArchive, it the base path with service name
-        # and service version as prefix. e.g.:
-        # with base_path = '/tmp/my_bento_archive/', the saved bento will resolve in
-        # the directory: '/tmp/my_bento_archive/service_name/version/'
+        # Full path containing saved BentoService bundle, it the base path with service
+        # name and service version as prefix. e.g.:
+        # with base_path = '/tmp/my_bento_repo/', the saved bento will resolve in
+        # the directory: '/tmp/my_bento_repo/service_name/version/'
         target_dir = os.path.join(self.base_path, bento_name, bento_version)
 
         # Ensure parent directory exist
@@ -86,8 +89,9 @@ class _LocalBentoRepository(BentoRepositoryBase):
 
         # Raise if target bento version already exist in storage
         if os.path.exists(target_dir):
-            raise BentoMLRepositoryException(
-                "Existing Bento {name}:{version} found in archive: {target_dir}".format(
+            raise YataiRepositoryException(
+                "Existing BentoService bundle {name}:{version} found in repository: "
+                "{target_dir}".format(
                     name=bento_name, version=bento_version, target_dir=target_dir
                 )
             )
@@ -100,7 +104,7 @@ class _LocalBentoRepository(BentoRepositoryBase):
     def get(self, bento_name, bento_version):
         saved_path = os.path.join(self.base_path, bento_name, bento_version)
         if not os.path.exists(saved_path):
-            raise BentoMLRepositoryException(
+            raise YataiRepositoryException(
                 "Bento {}:{} not found in target repository".format(
                     bento_name, bento_version
                 )
@@ -114,21 +118,79 @@ class _LocalBentoRepository(BentoRepositoryBase):
 
 class _S3BentoRepository(BentoRepositoryBase):
     def __init__(self, base_url):
-        # Ensure bucket exist and server has permission to manage files under base_path
-        self.base_url = base_url
         self.uri_type = BentoUri.S3
+
+        parse_result = urlparse(base_url)
+        self.bucket = parse_result.netloc
+        self.base_path = parse_result.path.lstrip('/')
+
+        self.s3_client = boto3.client("s3")
+
+    @property
+    def _expiration(self):
+        return config('yatai').getint('bento_uri_default_expiration')
+
+    def _get_object_name(self, bento_name, bento_version):
+        return "/".join([self.base_path, bento_name, bento_version]) + '.tar.gz'
 
     def add(self, bento_name, bento_version):
         # Generate pre-signed s3 path for upload
-        raise NotImplementedError
+
+        object_name = self._get_object_name(bento_name, bento_version)
+
+        try:
+            response = self.s3_client.generate_presigned_post(
+                self.bucket,
+                object_name,
+                Fields=None,
+                Conditions=None,
+                ExpiresIn=self._expiration,
+            )
+        except Exception as e:
+            raise YataiRepositoryException(
+                "Not able to get pre-signed URL on S3. Error: {}".format(e)
+            )
+
+        additional_fields = response['fields']
+        additional_fields['url'] = response['url']
+        return BentoUri(
+            type=self.uri_type,
+            uri='s3://{}/{}'.format(self.bucket, object_name),
+            additional_fields=json.dumps(additional_fields),
+        )
 
     def get(self, bento_name, bento_version):
         # Return s3 path containing uploaded Bento files
-        raise NotImplementedError
+
+        object_name = self._get_object_name(bento_name, bento_version)
+
+        try:
+            response = self.s3_client.generate_presigned_url(
+                'get_object',
+                Params={'Bucket': self.bucket, 'Key': object_name},
+                ExpiresIn=self._expiration,
+            )
+        except Exception as e:
+            raise YataiRepositoryException(
+                "Not able to get pre-signed URL on S3. Error: {}".format(e)
+            )
+        return response
 
     def dangerously_delete(self, bento_name, bento_version):
         # Remove s3 path containing related Bento files
-        raise NotImplementedError
+
+        object_name = self._get_object_name(bento_name, bento_version)
+
+        try:
+            response = self.s3_client.delete_object(Bucket=self.bucket, Key=object_name)
+
+            DELETE_MARKER = 'DeleteMarker'  # whether object is successfully deleted.
+        except Exception as e:
+            raise YataiRepositoryException(
+                "Not able to delete object on S3. Error: {}".format(e)
+            )
+
+        return response[DELETE_MARKER]
 
 
 class BentoRepository(BentoRepositoryBase):

@@ -18,15 +18,17 @@ from __future__ import print_function
 
 import os
 
-ARTIFACTS_SUBPATH = "artifacts"
+from bentoml.exceptions import InvalidArgument
+
+ARTIFACTS_DIR_NAME = "artifacts"
 
 
-class ArtifactSpec(object):
+class BentoServiceArtifact(object):
     """
     Artifact is a spec describing how to pack and load different types
     of model dependencies to/from file system.
 
-    A call to pack and load should return an ArtifactInstance that can
+    A call to pack and load should return an BentoServiceArtifactWrapper that can
     be saved to file system or retrieved for BentoService workload
     """
 
@@ -56,10 +58,10 @@ class ArtifactSpec(object):
         """
 
 
-class ArtifactInstance(object):
+class BentoServiceArtifactWrapper(object):
     """
-    ArtifactInstance is an object representing a materialized Artifact, either
-    loaded from file system or packed with data in a python session
+    BentoServiceArtifactWrapper is an object representing a materialized Artifact,
+    either loaded from file system or packed with data in a python session
     """
 
     def __init__(self, spec):
@@ -68,7 +70,8 @@ class ArtifactInstance(object):
     @property
     def spec(self):
         """
-        :return: reference to the ArtifactSpec that produced this ArtifactInstance
+        :return: reference to the BentoServiceArtifact that generated this
+        BentoServiceArtifactWrapper
         """
         return self._spec
 
@@ -79,8 +82,7 @@ class ArtifactInstance(object):
 
     def get(self):
         """
-        Get returns an python object which provides all the functionality this
-        artifact provides
+        Get returns a reference to the artifact being packed
         """
 
 
@@ -91,7 +93,7 @@ class ArtifactCollection(dict):
 
     def __setitem__(self, key, artifact):
         if key != artifact.spec.name:
-            raise ValueError(
+            raise InvalidArgument(
                 "Must use Artifact name as key, {} not equal to {}".format(
                     key, artifact.spec.name
                 )
@@ -103,11 +105,11 @@ class ArtifactCollection(dict):
         return self[item].get()
 
     def add(self, artifact):
-        if not isinstance(artifact, ArtifactInstance):
-            raise TypeError(
-                "ArtifactCollection only accepts type bentoml.ArtifactInstance,"
-                "Must call Artifact#pack or Artifact#load before adding to"
-                "an ArtifactCollection"
+        if not isinstance(artifact, BentoServiceArtifactWrapper):
+            raise InvalidArgument(
+                "ArtifactCollection only accepts type BentoServiceArtifactWrapper,"
+                "Must call BentoServiceArtifact#pack or BentoServiceArtifact#load "
+                "before adding to an ArtifactCollection"
             )
 
         super(ArtifactCollection, self).__setitem__(artifact.spec.name, artifact)
@@ -116,21 +118,7 @@ class ArtifactCollection(dict):
         """
         bulk operation for saving all artifacts in self.values() to `dst` path
         """
-        save_path = os.path.join(dst, ARTIFACTS_SUBPATH)
+        save_path = os.path.join(dst, ARTIFACTS_DIR_NAME)
         os.mkdir(save_path)
         for artifact in self.values():
             artifact.save(save_path)
-
-    @classmethod
-    def load(cls, path, artifacts_spec):
-        """bulk operation for loading all artifacts from path based on a list of
-        ArtifactSpec
-        """
-        load_path = os.path.join(path, ARTIFACTS_SUBPATH)
-        artifacts = cls()
-
-        for artifact_spec in artifacts_spec:
-            artifact_instance = artifact_spec.load(load_path)
-            artifacts.add(artifact_instance)
-
-        return artifacts

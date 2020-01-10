@@ -21,6 +21,10 @@ import logging
 import tempfile
 import shutil
 
+
+from bentoml import config
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -34,6 +38,7 @@ class TempDirectory(object):
     """
 
     def __init__(self, cleanup=True, prefix="temp"):
+
         self._cleanup = cleanup
         self._prefix = prefix
         self.path = None
@@ -46,6 +51,12 @@ class TempDirectory(object):
         return self.path
 
     def __exit__(self, exc_type, exc_val, exc_tb):
+        if config('core').getboolean('debug'):
+            logger.debug(
+                'BentoML in debug mode, keeping temp directory "%s"', self.path
+            )
+            return
+
         if self._cleanup:
             self.cleanup()
 

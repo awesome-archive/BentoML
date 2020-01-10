@@ -22,10 +22,23 @@ import pandas as pd
 import numpy as np
 
 
+PANDAS_DATAFRAME_TO_DICT_ORIENT_OPTIONS = [
+    'dict',
+    'list',
+    'series',
+    'split',
+    'records',
+    'index',
+]
+
+
 class BentoHandler:
-    """Handler in BentoML is the layer between a user API request and
-    the input to user's API function.
+    """BentoHandler is an abstraction layer between user defined API callback function
+    and prediction request input in a variety of different forms, such as HTTP request
+    body, command line arguments or AWS Lambda event object.
     """
+
+    HTTP_METHODS = ["POST", "GET"]
 
     def handle_request(self, request, func):
         """Handles an HTTP request, convert it into corresponding data
@@ -52,64 +65,52 @@ class BentoHandler:
         data format that user API function is expecting, and use API
         function result as response
 
-        :param event: A dict containing AWS lambda event information
+        :param event: AWS lambda event data of the python `dict` type
         :param func: user API function
         """
         raise NotImplementedError
 
     @property
     def request_schema(self):
+        """
+        :return: OpenAPI json schema for the HTTP API endpoint created with this handler
+        """
         return {"application/json": {"schema": {"type": "object"}}}
 
     @property
     def pip_dependencies(self):
+        """
+        :return: List of PyPI package names required by this BentoHandler
+        """
         return []
 
-    def handle_clipper_strings(self, inputs, func):
-        """Handle incoming input data for clipper cluster.
 
-        :param inputs: Incoming inputs from clipper cluster, "strings" format.
-        """
-        raise NotImplementedError
+class NumpyJsonEncoder(json.JSONEncoder):
+    """ Special json encoder for numpy types """
 
-    def handle_clipper_bytes(self, inputs, func):
-        """Handle incoming input data for clipper cluster.
+    def default(self, o):  # pylint: disable=method-hidden
+        if isinstance(o, np.generic):
+            return o.item()
 
-        :param inputs: Incoming inputs from clipper cluster, "bytes" format.
-        """
-        raise NotImplementedError
+        if isinstance(o, np.ndarray):
+            return o.tolist()
 
-    def handle_clipper_ints(self, inputs, func):
-        """Handle incoming input data for clipper cluster.
-
-        :param inputs: Incoming inputs from clipper cluster, "integers" format,
-        """
-        raise NotImplementedError
-
-    def handle_clipper_doubles(self, inputs, func):
-        """Handle incoming input data for clipper cluster.
-
-        :param inputs: Incoming inputs from clipper cluster, "doubles" format,
-        """
-        raise NotImplementedError
-
-    def handle_clipper_floats(self, inputs, func):
-        """Handle incoming input data for clipper cluster.
-
-        :param inputs: Incoming inputs from clipper cluster, "floats" format,
-        """
-        raise NotImplementedError
+        return json.JSONEncoder.default(self, o)
 
 
-def get_output_str(result, output_format, output_orient="records"):
-    if output_format == "str":
-        return str(result)
-    elif output_format == "json":
-        if isinstance(result, pd.DataFrame):
-            return result.to_json(orient=output_orient)
-        elif isinstance(result, np.ndarray):
-            return json.dumps(result.tolist())
-        else:
-            return json.dumps(result)
-    else:
-        raise ValueError("Output format {} is not supported".format(output_format))
+def api_func_result_to_json(result, pandas_dataframe_orient="records"):
+    assert (
+        pandas_dataframe_orient in PANDAS_DATAFRAME_TO_DICT_ORIENT_OPTIONS
+    ), f"unkown pandas dataframe orient '{pandas_dataframe_orient}'"
+
+    if isinstance(result, pd.DataFrame):
+        return result.to_json(orient=pandas_dataframe_orient)
+
+    if isinstance(result, pd.Series):
+        return pd.DataFrame(result).to_dict(orient=pandas_dataframe_orient)
+
+    try:
+        return json.dumps(result, cls=NumpyJsonEncoder)
+    except (TypeError, OverflowError):
+        # when result is not JSON serializable
+        return json.dumps({"result": str(result)})

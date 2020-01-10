@@ -33,7 +33,7 @@ from sqlalchemy.orm.exc import NoResultFound
 from google.protobuf.json_format import ParseDict
 
 from bentoml.utils import ProtoMessageToDict
-from bentoml.exceptions import BentoMLRepositoryException
+from bentoml.exceptions import YataiRepositoryException
 from bentoml.db import Base, create_session
 from bentoml.proto.repository_pb2 import (
     UploadStatus,
@@ -80,7 +80,7 @@ def _bento_orm_obj_to_pb(bento_obj):
         bento_obj.bento_service_metadata, BentoServiceMetadata()
     )
     bento_uri = BentoUri(
-        uri=bento_obj.uri, uri_type=BentoUri.StorageType.Value(bento_obj.uri_type)
+        uri=bento_obj.uri, type=BentoUri.StorageType.Value(bento_obj.uri_type)
     )
     return BentoPB(
         name=bento_obj.name,
@@ -132,7 +132,7 @@ class BentoMetadataStore(object):
                     bento_service_metadata_pb
                 )
             except NoResultFound:
-                raise BentoMLRepositoryException(
+                raise YataiRepositoryException(
                     "Bento %s:%s is not found in repository" % bento_name, bento_version
                 )
 
@@ -149,7 +149,7 @@ class BentoMetadataStore(object):
                 # upload_status_pb.updated_at, update should be ignored
                 bento_obj.upload_status = ProtoMessageToDict(upload_status_pb)
             except NoResultFound:
-                raise BentoMLRepositoryException(
+                raise YataiRepositoryException(
                     "Bento %s:%s is not found in repository" % bento_name, bento_version
                 )
 
@@ -161,14 +161,15 @@ class BentoMetadataStore(object):
                     .filter_by(name=bento_name, version=bento_version)
                     .one()
                 )
-                if not bento_obj.deleted:
-                    raise BentoMLRepositoryException(
-                        "Bento %s:%s has already been deleted" % bento_name,
-                        bento_version,
+                if bento_obj.deleted:
+                    raise YataiRepositoryException(
+                        "Bento {}:{} has already been deleted".format(
+                            bento_name, bento_version
+                        )
                     )
                 bento_obj.deleted = True
             except NoResultFound:
-                raise BentoMLRepositoryException(
+                raise YataiRepositoryException(
                     "Bento %s:%s is not found in repository" % bento_name, bento_version
                 )
 

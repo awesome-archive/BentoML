@@ -2,6 +2,7 @@ syntax = "proto3";
 package bentoml;
 
 import "google/protobuf/any.proto";
+import "google/protobuf/timestamp.proto";
 
 import "status.proto";
 
@@ -32,15 +33,25 @@ message DeploymentSpec {
     string region = 1;
     string instance_type = 2;
     int32 instance_count = 3;
+    // API Name is required.  Each sagemaker deployment provide only /invocation path,
+    // If bento service has more than one API function, user needs to define which API
+    // function would like to be used for sagemaker deployment
     string api_name = 4;
+    // Optional. When user didn't define gunicorn worker count, service will find the
+    // current system's cpu core count and set worker equal to half of that plus 1.
+    int32 num_of_gunicorn_workers_per_instance = 5;
   }
 
   message AwsLambdaOperatorConfig {
     string region = 1;
+    string api_name = 2;
+    int32 memory_size = 3;
+    int32 timeout = 4;
   }
 
   message GcpFunctionOperatorConfig {
     string region = 1;
+    string api_name = 2;
   }
 
   message KubernetesOperatorConfig {
@@ -85,6 +96,7 @@ message DeploymentState {
   // Raw json string that contains all deployment state information that is
   // platform specific
   string info_json = 3;
+  google.protobuf.Timestamp timestamp = 4;
 }
 
 message Deployment {
@@ -107,6 +119,9 @@ message Deployment {
   // Optional, used for managing deployments, this gets translate to similar 'labels'
   // concept in target deployment platform
   map<string, string> labels = 6;
+
+  google.protobuf.Timestamp created_at = 7;
+  google.protobuf.Timestamp last_updated_at = 8;
 }
 
 message DeploymentStatus {
@@ -126,6 +141,9 @@ message ApplyDeploymentResponse {
 message DeleteDeploymentRequest {
   string deployment_name = 1;
   string namespace = 2;
+  
+  // force delete the deployment record in database and ignore errors when deleting cloud resources
+  bool force_delete = 3;
 }
 
 message DeleteDeploymentResponse {

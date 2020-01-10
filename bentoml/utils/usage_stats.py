@@ -26,8 +26,11 @@ import atexit
 
 import uuid
 import requests
+from ruamel.yaml import YAML
 
-from bentoml import config, __version__ as BENTOML_VERSION, _version as version_mod
+from bentoml.utils import _is_pypi_release, ProtoMessageToDict
+from bentoml import config
+from bentoml import __version__ as BENTOML_VERSION
 
 
 logger = logging.getLogger(__name__)
@@ -42,13 +45,6 @@ PY_VERSION = "{major}.{minor}.{micro}".format(
 SESSION_ID = str(uuid.uuid4())  # uuid that marks current python session
 
 
-def _is_pypi_release():
-    is_installed_package = hasattr(version_mod, 'version_json')
-    is_tagged = not BENTOML_VERSION.startswith('0+untagged')
-    is_clean = not version_mod.get_versions()['dirty']
-    return is_installed_package and is_tagged and is_clean
-
-
 # Use dev amplitude key
 API_KEY = '7f65f2446427226eb86f6adfacbbf47a'
 if _is_pypi_release():
@@ -58,13 +54,14 @@ if _is_pypi_release():
 
 def _send_amplitude_event(event_type, event_properties):
     """Send event to amplitude
-    https://developers.amplitude.com/?java#keys-for-the-event-argument
+    https://developers.amplitude.com/?objc--ios#http-api-v2-request-format
     """
     event = [
         {
             "event_type": event_type,
             "user_id": SESSION_ID,
             "event_properties": event_properties,
+            "ip": "$remote",
         }
     ]
     event_data = {"api_key": API_KEY, "event": json.dumps(event)}
@@ -77,22 +74,49 @@ def _send_amplitude_event(event_type, event_properties):
 
 
 def _get_bento_service_event_properties(bento_service, properties=None):
+    bento_service_metadata = bento_service.get_bento_service_metadata_pb()
+    return _bento_service_metadata_to_event_properties(
+        bento_service_metadata, properties
+    )
+
+
+def _get_bento_service_event_properties_from_bundle_path(bundle_path, properties=None):
+    from bentoml.bundler import load_bento_service_metadata
+
+    bento_service_metadata = load_bento_service_metadata(bundle_path)
+    return _bento_service_metadata_to_event_properties(
+        bento_service_metadata, properties
+    )
+
+
+def _bento_service_metadata_to_event_properties(
+    bento_service_metadata, properties=None
+):
     if properties is None:
         properties = {}
 
-    artifact_types = []
-    handler_types = []
+    artifact_types = set()
+    handler_types = set()
 
-    for artifact in bento_service.artifacts.items():
-        artifact_instance = artifact[1]
-        artifact_types.append(artifact_instance.__class__.__name__)
+    for artifact in bento_service_metadata.artifacts:
+        artifact_types.add(artifact.artifact_type)
 
-    for api in bento_service.get_service_apis():
-        handler_types.append(api.handler.__class__.__name__)
+    for api in bento_service_metadata.apis:
+        handler_types.add(api.handler_type)
 
-    properties["handler_types"] = handler_types
-    properties["artifact_types"] = artifact_types
-    properties["env"] = bento_service.env.to_dict()
+    if handler_types:
+        properties["handler_types"] = list(handler_types)
+
+    if artifact_types:
+        properties["artifact_types"] = list(artifact_types)
+    else:
+        properties["artifact_types"] = ["NO_ARTIFACT"]
+
+    env_dict = ProtoMessageToDict(bento_service_metadata.env)
+    if 'conda_env' in env_dict:
+        env_dict['conda_env'] = YAML().load(env_dict['conda_env'])
+    properties['env'] = env_dict
+
     return properties
 
 
@@ -102,6 +126,12 @@ def track(event_type, event_properties=None):
 
     if event_properties is None:
         event_properties = {}
+
+    if 'bento_service_bundle_path' in event_properties:
+        _get_bento_service_event_properties_from_bundle_path(
+            event_properties['bento_service_bundle_path'], event_properties
+        )
+        del event_properties['bento_service_bundle_path']
 
     event_properties['py_version'] = PY_VERSION
     event_properties["bento_version"] = BENTOML_VERSION
@@ -124,10 +154,12 @@ def track_load_finish(bento_service):
     return track("load", properties)
 
 
-def track_cli(command, deploy_platform=None):
+def track_cli(command, deploy_platform=None, extra_properties=None):
     properties = {}
     if deploy_platform is not None:
         properties['platform'] = deploy_platform
+    if extra_properties is not None:
+        properties.update(extra_properties)
     return track('cli-' + command, properties)
 
 

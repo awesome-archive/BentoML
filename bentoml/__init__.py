@@ -16,29 +16,27 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+
 from ._version import get_versions
 
 __version__ = get_versions()['version']
 del get_versions
 
 from bentoml.configuration import config
-from bentoml.archive import load, save_to_dir
-from bentoml import handlers
+from bentoml.utils.log import configure_logging
+
+# Configuring logging properly before loading other modules
+configure_logging()
+
+from bentoml.bundler import load, save_to_dir
 from bentoml.service import (
     BentoService,
     api_decorator as api,
     env_decorator as env,
     artifacts_decorator as artifacts,
     ver_decorator as ver,
+    save,
 )
-from bentoml.server import metrics
-from bentoml.yatai.python_api import upload_bento_service
-from bentoml.utils.log import configure_logging
-
-configure_logging()
-
-
-save = upload_bento_service
 
 
 __all__ = [
@@ -48,10 +46,10 @@ __all__ = [
     "config",
     "env",
     "ver",
-    "metrics",
     "BentoService",
-    "handlers",
     "load",
     "save",
     "save_to_dir",
+    "handlers",
+    "artifact",
 ]

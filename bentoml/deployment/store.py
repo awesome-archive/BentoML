@@ -24,7 +24,7 @@ from sqlalchemy import Column, String, Integer, DateTime, JSON, UniqueConstraint
 from sqlalchemy.orm.exc import NoResultFound
 from google.protobuf.json_format import ParseDict
 
-from bentoml.exceptions import BentoMLDeploymentException
+from bentoml.exceptions import YataiDeploymentException
 from bentoml.db import Base, create_session
 from bentoml.proto import deployment_pb2
 from bentoml.utils import ProtoMessageToDict
@@ -51,6 +51,7 @@ class Deployment(Base):
     annotations = Column(JSON, nullable=False, default={})
 
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    last_updated_at = Column(DateTime, default=datetime.datetime.utcnow)
 
 
 def _deployment_pb_to_orm_obj(deployment_pb, deployment_obj=Deployment()):
@@ -60,11 +61,13 @@ def _deployment_pb_to_orm_obj(deployment_pb, deployment_obj=Deployment()):
     deployment_obj.state = ProtoMessageToDict(deployment_pb.state)
     deployment_obj.labels = dict(deployment_pb.labels)
     deployment_obj.annotations = dict(deployment_pb.annotations)
+    deployment_obj.created_at = deployment_pb.created_at.ToDatetime()
+    deployment_obj.last_updated_at = deployment_pb.last_updated_at.ToDatetime()
     return deployment_obj
 
 
 def _deployment_orm_obj_to_pb(deployment_obj):
-    return deployment_pb2.Deployment(
+    deployment_pb = deployment_pb2.Deployment(
         name=deployment_obj.name,
         namespace=deployment_obj.namespace,
         spec=ParseDict(deployment_obj.spec, deployment_pb2.DeploymentSpec()),
@@ -72,6 +75,10 @@ def _deployment_orm_obj_to_pb(deployment_obj):
         labels=deployment_obj.labels,
         annotations=deployment_obj.annotations,
     )
+    deployment_pb.created_at.FromDatetime(deployment_obj.created_at)
+    if deployment_obj.last_updated_at:
+        deployment_pb.last_updated_at.FromDatetime(deployment_obj.last_updated_at)
+    return deployment_pb
 
 
 class DeploymentStore(object):
@@ -135,7 +142,7 @@ class DeploymentStore(object):
                 )
                 return sess.delete(deployment)
             except NoResultFound:
-                raise BentoMLDeploymentException(
+                raise YataiDeploymentException(
                     "Deployment '%s' in namespace: '%s' is not found" % name, namespace
                 )
 
